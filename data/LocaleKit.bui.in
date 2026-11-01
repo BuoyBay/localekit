@@ -1,0 +1,144 @@
+' Decimal input preserves visible fraction digits without binary floating-point rounding.
+Private Class PluralOperands
+    Public Property IntegerPart As Integer
+    Public Property VisibleDigits As Integer
+    Public Property TrimmedDigits As Integer
+    Public Property Fraction As Integer
+    Public Property TrimmedFraction As Integer
+    Public Property Exponent As Integer
+End Class
+
+Private Function LocaleOperands(numberText As String) As PluralOperands
+    Dim count As Integer = String.Len(numberText)
+    If count < 1 Or count > 39 Then Throw New InvalidArgumentException("Plural number must be a bounded ASCII decimal")
+    Dim p As New PluralOperands()
+    Dim startAt As Integer = 0
+    Dim first As String = String.Left(numberText, 1)
+    If first = "-" Or first = "+" Then startAt = 1
+    Dim integerDigits As Integer = 0
+    Dim fractional As Boolean = False
+    For index As Integer = startAt To count - 1
+        Dim digit As Integer = String.Asc(numberText, index + 1) - 48
+        If digit = -2 And Not fractional And integerDigits > 0 Then
+            fractional = True
+            Continue For
+        End If
+        If digit < 0 Or digit > 9 Then Throw New InvalidArgumentException("Plural number requires ASCII digits and optional decimal point")
+        If fractional Then
+            p.VisibleDigits += 1
+            If p.VisibleDigits > 18 Then Throw New InvalidArgumentException("Plural fraction exceeds 18 digits")
+            p.Fraction = p.Fraction * 10 + digit
+        Else
+            integerDigits += 1
+            If integerDigits > 18 Then Throw New InvalidArgumentException("Plural integer exceeds 18 digits")
+            p.IntegerPart = p.IntegerPart * 10 + digit
+        End If
+    Next
+    If integerDigits = 0 Or (fractional And p.VisibleDigits = 0) Then Throw New InvalidArgumentException("Plural number is incomplete")
+    p.TrimmedDigits = p.VisibleDigits
+    p.TrimmedFraction = p.Fraction
+    While p.TrimmedDigits > 0 And p.TrimmedFraction Mod 10 = 0
+        p.TrimmedDigits -= 1
+        p.TrimmedFraction = p.TrimmedFraction \ 10
+    End While
+    Return p
+End Function
+
+''' Resolve a supported locale tag to a CLDR rule key, preserving region-specific rules.
+Public Function PluralRuleLocale(locale As String) As String
+    If String.Len(locale) < 2 Or String.Len(locale) > 80 Then Throw New InvalidArgumentException("Invalid plural locale tag")
+    Dim normalized As String = String.LCase(String.Replace(locale, "_", "-"))
+    Dim parts As Array Of String = String.Split(normalized, "-")
+    For Each part As String In parts
+        If String.Len(part) = 0 Or String.Len(part) > 8 Then Throw New InvalidArgumentException("Invalid plural locale subtag")
+        For Each ch As String In String.Chars(part)
+            Dim code As Integer = String.Asc(ch)
+            If Not ((code >= 97 And code <= 122) Or (code >= 48 And code <= 57)) Then Throw New InvalidArgumentException("Invalid plural locale character")
+        Next
+    Next
+    If LocaleKnownRule(normalized) Then Return normalized
+    ' Preserve the longest known language/script prefix, stopping at extensions.
+    Dim prefix As String = parts(0)
+    Dim known As String = ""
+    For index As Integer = 1 To Array.Count(parts) - 1
+        If String.Len(parts(index)) = 1 Then Exit For
+        prefix += "-" + parts(index)
+        If LocaleKnownRule(prefix) Then known = prefix
+    Next
+    If known <> "" Then Return known
+    ' A script between language and region must not hide the Portugal override.
+    If parts(0) = "pt" Then
+        Dim regionIndex As Integer = 1
+        If Array.Count(parts) > 1 Then
+            If String.Len(parts(1)) = 4 Then regionIndex = 2
+        End If
+        If regionIndex < Array.Count(parts) Then
+            If parts(regionIndex) = "pt" Then Return "pt-pt"
+        End If
+    End If
+    If LocaleKnownRule(parts(0)) Then Return parts(0)
+    Throw New InvalidArgumentException("Unsupported CLDR plural locale: " + locale)
+End Function
+
+''' Select zero/one/two/few/many/other from an exact signed decimal; compact exponents are zero.
+Public Function CardinalPlural(locale As String, numberText As String) As String
+    Dim resolved As String = PluralRuleLocale(locale)
+    Return LocaleCardinalRule(resolved, LocaleOperands(numberText))
+End Function
+
+''' Select an ordinal category, preserving the number's visible decimal precision.
+Public Function OrdinalPlural(locale As String, numberText As String) As String
+    Dim resolved As String = PluralRuleLocale(locale)
+    Return LocaleOrdinalRule(resolved, LocaleOperands(numberText))
+End Function
+
+Public Function PluralCLDRVersion() As String
+    Return "49"
+End Function
+
+''' A bounded, explicit-locale message with category fallback and literal {count} substitution.
+Public Class PluralMessage
+    Private Property mLocale As String
+    Private Property mOther As String
+    Private Property mCategories As Array Of String
+    Private Property mTexts As Array Of String
+    Private Property mOrdinal As Boolean
+
+    Public Sub Constructor(locale As String, otherText As String, ordinal As Boolean = False)
+        mLocale = PluralRuleLocale(locale)
+        If String.Len(otherText) > 1000000 Then Throw New InvalidArgumentException("Plural message exceeds one million scalars")
+        mOther = otherText
+        mOrdinal = ordinal
+    End Sub
+
+    Public Sub SetForm(category As String, text As String)
+        If String.Compare(category, String.LCase(category), True) <> 0 Then Throw New InvalidArgumentException("Plural category must be lower-case")
+        If String.Len(text) > 1000000 Then Throw New InvalidArgumentException("Plural message exceeds one million scalars")
+        If category = "other" Then
+            mOther = text
+            Exit Sub
+        End If
+        If category <> "zero" And category <> "one" And category <> "two" And category <> "few" And category <> "many" Then Throw New InvalidArgumentException("Invalid plural category")
+        For index As Integer = 0 To Array.Count(mCategories) - 1
+            If mCategories(index) = category Then
+                mTexts(index) = text
+                Exit Sub
+            End If
+        Next
+        Array.Append(mCategories, category)
+        Array.Append(mTexts, text)
+    End Sub
+
+    Public Function Format(numberText As String) As String
+        Dim category As String = CardinalPlural(mLocale, numberText)
+        If mOrdinal Then category = OrdinalPlural(mLocale, numberText)
+        Dim selected As String = mOther
+        For index As Integer = 0 To Array.Count(mCategories) - 1
+            If mCategories(index) = category Then selected = mTexts(index)
+        Next
+        ' One linear replacement; bounded inputs cap the intermediate below 6M scalars.
+        Dim formatted As String = String.Replace(selected, "{count}", numberText, 1000000, True)
+        If String.Len(formatted) > 1000000 Then Throw New InvalidArgumentException("Formatted plural message exceeds one million scalars")
+        Return formatted
+    End Function
+End Class

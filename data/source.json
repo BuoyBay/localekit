@@ -1,0 +1,9 @@
+{
+  "cldr_version": "49",
+  "tag": "49.0.0",
+  "repository": "https://github.com/unicode-org/cldr-json",
+  "sha256": {
+    "plurals.json": "166cc4c4d7f45a3888c781e4e48974aab40f50bd42e592eacdcc79419f280353",
+    "ordinals.json": "3d2b2e70009e0d655f459683d1a32a124b13e75438c7ddc084e6597d3b460e6a"
+  }
+}

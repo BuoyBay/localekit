@@ -1,0 +1,13 @@
+{
+  "schema": 2,
+  "source_language": "en",
+  "languages": ["ru", "ar", "fr"],
+  "messages": [
+    {"id": "SaveCaption", "default": "Save", "translations": {"fr": {"text": "Enregistrer", "source": "Save", "state": "translated"}}},
+    {"id": "FileCount", "default": {"one": "{count} file", "other": "{count} files"}, "translations": {
+      "ru": {"forms": {"one": "{count} файл", "few": "{count} файла", "many": "{count} файлов", "other": "{count} файла"}, "source": {"one": "{count} file", "other": "{count} files"}, "state": "translated"},
+      "ar": {"forms": {"zero": "لا ملفات", "one": "ملف", "two": "ملفان", "few": "{count} ملفات", "many": "{count} ملفًا", "other": "{count} ملف"}, "source": {"one": "{count} file", "other": "{count} files"}, "state": "translated"}
+    }},
+    {"id": "Place", "ordinal": true, "default": {"one": "{count}st", "two": "{count}nd", "few": "{count}rd", "other": "{count}th"}}
+  ]
+}

@@ -1,0 +1,403 @@
+' Decimal input preserves visible fraction digits without binary floating-point rounding.
+Private Class PluralOperands
+    Public Property IntegerPart As Integer
+    Public Property VisibleDigits As Integer
+    Public Property TrimmedDigits As Integer
+    Public Property Fraction As Integer
+    Public Property TrimmedFraction As Integer
+    Public Property Exponent As Integer
+End Class
+
+Private Function LocaleOperands(numberText As String) As PluralOperands
+    Dim count As Integer = String.Len(numberText)
+    If count < 1 Or count > 39 Then Throw New InvalidArgumentException("Plural number must be a bounded ASCII decimal")
+    Dim p As New PluralOperands()
+    Dim startAt As Integer = 0
+    Dim first As String = String.Left(numberText, 1)
+    If first = "-" Or first = "+" Then startAt = 1
+    Dim integerDigits As Integer = 0
+    Dim fractional As Boolean = False
+    For index As Integer = startAt To count - 1
+        Dim digit As Integer = String.Asc(numberText, index + 1) - 48
+        If digit = -2 And Not fractional And integerDigits > 0 Then
+            fractional = True
+            Continue For
+        End If
+        If digit < 0 Or digit > 9 Then Throw New InvalidArgumentException("Plural number requires ASCII digits and optional decimal point")
+        If fractional Then
+            p.VisibleDigits += 1
+            If p.VisibleDigits > 18 Then Throw New InvalidArgumentException("Plural fraction exceeds 18 digits")
+            p.Fraction = p.Fraction * 10 + digit
+        Else
+            integerDigits += 1
+            If integerDigits > 18 Then Throw New InvalidArgumentException("Plural integer exceeds 18 digits")
+            p.IntegerPart = p.IntegerPart * 10 + digit
+        End If
+    Next
+    If integerDigits = 0 Or (fractional And p.VisibleDigits = 0) Then Throw New InvalidArgumentException("Plural number is incomplete")
+    p.TrimmedDigits = p.VisibleDigits
+    p.TrimmedFraction = p.Fraction
+    While p.TrimmedDigits > 0 And p.TrimmedFraction Mod 10 = 0
+        p.TrimmedDigits -= 1
+        p.TrimmedFraction = p.TrimmedFraction \ 10
+    End While
+    Return p
+End Function
+
+''' Resolve a supported locale tag to a CLDR rule key, preserving region-specific rules.
+Public Function PluralRuleLocale(locale As String) As String
+    If String.Len(locale) < 2 Or String.Len(locale) > 80 Then Throw New InvalidArgumentException("Invalid plural locale tag")
+    Dim normalized As String = String.LCase(String.Replace(locale, "_", "-"))
+    Dim parts As Array Of String = String.Split(normalized, "-")
+    For Each part As String In parts
+        If String.Len(part) = 0 Or String.Len(part) > 8 Then Throw New InvalidArgumentException("Invalid plural locale subtag")
+        For Each ch As String In String.Chars(part)
+            Dim code As Integer = String.Asc(ch)
+            If Not ((code >= 97 And code <= 122) Or (code >= 48 And code <= 57)) Then Throw New InvalidArgumentException("Invalid plural locale character")
+        Next
+    Next
+    If LocaleKnownRule(normalized) Then Return normalized
+    ' Preserve the longest known language/script prefix, stopping at extensions.
+    Dim prefix As String = parts(0)
+    Dim known As String = ""
+    For index As Integer = 1 To Array.Count(parts) - 1
+        If String.Len(parts(index)) = 1 Then Exit For
+        prefix += "-" + parts(index)
+        If LocaleKnownRule(prefix) Then known = prefix
+    Next
+    If known <> "" Then Return known
+    ' A script between language and region must not hide the Portugal override.
+    If parts(0) = "pt" Then
+        Dim regionIndex As Integer = 1
+        If Array.Count(parts) > 1 Then
+            If String.Len(parts(1)) = 4 Then regionIndex = 2
+        End If
+        If regionIndex < Array.Count(parts) Then
+            If parts(regionIndex) = "pt" Then Return "pt-pt"
+        End If
+    End If
+    If LocaleKnownRule(parts(0)) Then Return parts(0)
+    Throw New InvalidArgumentException("Unsupported CLDR plural locale: " + locale)
+End Function
+
+''' Select zero/one/two/few/many/other from an exact signed decimal; compact exponents are zero.
+Public Function CardinalPlural(locale As String, numberText As String) As String
+    Dim resolved As String = PluralRuleLocale(locale)
+    Return LocaleCardinalRule(resolved, LocaleOperands(numberText))
+End Function
+
+''' Select an ordinal category, preserving the number's visible decimal precision.
+Public Function OrdinalPlural(locale As String, numberText As String) As String
+    Dim resolved As String = PluralRuleLocale(locale)
+    Return LocaleOrdinalRule(resolved, LocaleOperands(numberText))
+End Function
+
+Public Function PluralCLDRVersion() As String
+    Return "49"
+End Function
+
+''' A bounded, explicit-locale message with category fallback and literal {count} substitution.
+Public Class PluralMessage
+    Private Property mLocale As String
+    Private Property mOther As String
+    Private Property mCategories As Array Of String
+    Private Property mTexts As Array Of String
+    Private Property mOrdinal As Boolean
+
+    Public Sub Constructor(locale As String, otherText As String, ordinal As Boolean = False)
+        mLocale = PluralRuleLocale(locale)
+        If String.Len(otherText) > 1000000 Then Throw New InvalidArgumentException("Plural message exceeds one million scalars")
+        mOther = otherText
+        mOrdinal = ordinal
+    End Sub
+
+    Public Sub SetForm(category As String, text As String)
+        If String.Compare(category, String.LCase(category), True) <> 0 Then Throw New InvalidArgumentException("Plural category must be lower-case")
+        If String.Len(text) > 1000000 Then Throw New InvalidArgumentException("Plural message exceeds one million scalars")
+        If category = "other" Then
+            mOther = text
+            Exit Sub
+        End If
+        If category <> "zero" And category <> "one" And category <> "two" And category <> "few" And category <> "many" Then Throw New InvalidArgumentException("Invalid plural category")
+        For index As Integer = 0 To Array.Count(mCategories) - 1
+            If mCategories(index) = category Then
+                mTexts(index) = text
+                Exit Sub
+            End If
+        Next
+        Array.Append(mCategories, category)
+        Array.Append(mTexts, text)
+    End Sub
+
+    Public Function Format(numberText As String) As String
+        Dim category As String = CardinalPlural(mLocale, numberText)
+        If mOrdinal Then category = OrdinalPlural(mLocale, numberText)
+        Dim selected As String = mOther
+        For index As Integer = 0 To Array.Count(mCategories) - 1
+            If mCategories(index) = category Then selected = mTexts(index)
+        Next
+        ' One linear replacement; bounded inputs cap the intermediate below 6M scalars.
+        Dim formatted As String = String.Replace(selected, "{count}", numberText, 1000000, True)
+        If String.Len(formatted) > 1000000 Then Throw New InvalidArgumentException("Formatted plural message exceeds one million scalars")
+        Return formatted
+    End Function
+End Class
+
+' Generated CLDR predicates; do not edit below this line.
+Private Function LocaleCardinalRule(locale As String, p As PluralOperands) As String
+    Select Case locale
+    Case "af", "an", "asa", "az", "bal", "bem", "bez", "bg", "brx", "ce", "cgg", "chr", "ckb", "dv", "ee", "el", "eo", "eu", "fo", "fur", "gsw", "ha", "haw", "hu", "jgo", "jmc", "ka", "kaj", "kcg", "kk", "kkj", "kl", "ks", "ksb", "ku", "ky", "lb", "lg", "mas", "mgo", "ml", "mn", "mr", "nah", "nb", "nd", "ne", "nn", "nnh", "no", "nr", "ny", "nyn", "om", "or", "os", "pap", "ps", "rm", "rof", "rwk", "saq", "sd", "sdh", "seh", "sn", "so", "sq", "ss", "ssy", "st", "syr", "ta", "te", "teo", "tig", "tk", "tn", "tr", "ts", "ug", "uz", "ve", "vo", "vun", "wae", "xh", "xog"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+    Case "ak", "bho", "csw", "guw", "ln", "mg", "nso", "pa", "ti", "wa"
+        If (((p.Fraction = 0 And ((p.IntegerPart >= 0 And p.IntegerPart <= 1))))) Then Return "one"
+    Case "am", "as", "bn", "doi", "fa", "gu", "hi", "kn", "kok", "kok-latn", "pcm", "tg", "vi", "zu"
+        If (((p.IntegerPart = 0)) Or ((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+    Case "ar", "ars"
+        If (((p.Fraction = 0 And (p.IntegerPart = 0)))) Then Return "zero"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2)))) Then Return "two"
+        If (((p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 3 And (p.IntegerPart Mod 100) <= 10))))) Then Return "few"
+        If (((p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 11 And (p.IntegerPart Mod 100) <= 99))))) Then Return "many"
+    Case "ast", "de", "en", "et", "fi", "fy", "ia", "ie", "io", "lij", "nl", "sc", "sv", "sw", "ur", "yi"
+        If (((p.IntegerPart = 1) And (p.VisibleDigits = 0))) Then Return "one"
+    Case "be"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 1)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 11))))) Then Return "one"
+        If (((p.Fraction = 0 And (((p.IntegerPart Mod 10) >= 2 And (p.IntegerPart Mod 10) <= 4))) And (Not (p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 12 And (p.IntegerPart Mod 100) <= 14)))))) Then Return "few"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 0))) Or ((p.Fraction = 0 And (((p.IntegerPart Mod 10) >= 5 And (p.IntegerPart Mod 10) <= 9)))) Or ((p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 11 And (p.IntegerPart Mod 100) <= 14))))) Then Return "many"
+    Case "blo", "cv", "ksh"
+        If (((p.Fraction = 0 And (p.IntegerPart = 0)))) Then Return "zero"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+    Case "br"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 1)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 11 Or (p.IntegerPart Mod 100) = 71 Or (p.IntegerPart Mod 100) = 91))))) Then Return "one"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 2)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 12 Or (p.IntegerPart Mod 100) = 72 Or (p.IntegerPart Mod 100) = 92))))) Then Return "two"
+        If (((p.Fraction = 0 And (((p.IntegerPart Mod 10) >= 3 And (p.IntegerPart Mod 10) <= 4) Or (p.IntegerPart Mod 10) = 9)) And (Not (p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 10 And (p.IntegerPart Mod 100) <= 19) Or ((p.IntegerPart Mod 100) >= 70 And (p.IntegerPart Mod 100) <= 79) Or ((p.IntegerPart Mod 100) >= 90 And (p.IntegerPart Mod 100) <= 99)))))) Then Return "few"
+        If (((Not (p.Fraction = 0 And (p.IntegerPart = 0))) And (p.Fraction = 0 And ((p.IntegerPart Mod 1000000) = 0)))) Then Return "many"
+    Case "bs", "hr", "sh", "sr"
+        If (((p.VisibleDigits = 0) And ((p.IntegerPart Mod 10) = 1) And (Not ((p.IntegerPart Mod 100) = 11))) Or (((p.Fraction Mod 10) = 1) And (Not ((p.Fraction Mod 100) = 11)))) Then Return "one"
+        If (((p.VisibleDigits = 0) And (((p.IntegerPart Mod 10) >= 2 And (p.IntegerPart Mod 10) <= 4)) And (Not (((p.IntegerPart Mod 100) >= 12 And (p.IntegerPart Mod 100) <= 14)))) Or ((((p.Fraction Mod 10) >= 2 And (p.Fraction Mod 10) <= 4)) And (Not (((p.Fraction Mod 100) >= 12 And (p.Fraction Mod 100) <= 14))))) Then Return "few"
+    Case "ca", "gl", "it", "lld", "pt-pt", "scn", "vec"
+        If (((p.IntegerPart = 1) And (p.VisibleDigits = 0))) Then Return "one"
+        If (((p.Exponent = 0) And (Not (p.IntegerPart = 0)) And ((p.IntegerPart Mod 1000000) = 0) And (p.VisibleDigits = 0)) Or ((Not ((p.Exponent >= 0 And p.Exponent <= 5))))) Then Return "many"
+    Case "ceb", "fil", "tl"
+        If (((p.VisibleDigits = 0) And (p.IntegerPart = 1 Or p.IntegerPart = 2 Or p.IntegerPart = 3)) Or ((p.VisibleDigits = 0) And (Not ((p.IntegerPart Mod 10) = 4 Or (p.IntegerPart Mod 10) = 6 Or (p.IntegerPart Mod 10) = 9))) Or ((Not (p.VisibleDigits = 0)) And (Not ((p.Fraction Mod 10) = 4 Or (p.Fraction Mod 10) = 6 Or (p.Fraction Mod 10) = 9)))) Then Return "one"
+    Case "cs", "sk"
+        If (((p.IntegerPart = 1) And (p.VisibleDigits = 0))) Then Return "one"
+        If ((((p.IntegerPart >= 2 And p.IntegerPart <= 4)) And (p.VisibleDigits = 0))) Then Return "few"
+        If (((Not (p.VisibleDigits = 0)))) Then Return "many"
+    Case "cy"
+        If (((p.Fraction = 0 And (p.IntegerPart = 0)))) Then Return "zero"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2)))) Then Return "two"
+        If (((p.Fraction = 0 And (p.IntegerPart = 3)))) Then Return "few"
+        If (((p.Fraction = 0 And (p.IntegerPart = 6)))) Then Return "many"
+    Case "da"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1))) Or ((Not (p.TrimmedFraction = 0)) And (p.IntegerPart = 0 Or p.IntegerPart = 1))) Then Return "one"
+    Case "dsb", "hsb"
+        If (((p.VisibleDigits = 0) And ((p.IntegerPart Mod 100) = 1)) Or (((p.Fraction Mod 100) = 1))) Then Return "one"
+        If (((p.VisibleDigits = 0) And ((p.IntegerPart Mod 100) = 2)) Or (((p.Fraction Mod 100) = 2))) Then Return "two"
+        If (((p.VisibleDigits = 0) And (((p.IntegerPart Mod 100) >= 3 And (p.IntegerPart Mod 100) <= 4))) Or ((((p.Fraction Mod 100) >= 3 And (p.Fraction Mod 100) <= 4)))) Then Return "few"
+    Case "es"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Exponent = 0) And (Not (p.IntegerPart = 0)) And ((p.IntegerPart Mod 1000000) = 0) And (p.VisibleDigits = 0)) Or ((Not ((p.Exponent >= 0 And p.Exponent <= 5))))) Then Return "many"
+    Case "ff", "hy", "kab"
+        If (((p.IntegerPart = 0 Or p.IntegerPart = 1))) Then Return "one"
+    Case "fr", "pt"
+        If ((((p.IntegerPart >= 0 And p.IntegerPart <= 1)))) Then Return "one"
+        If (((p.Exponent = 0) And (Not (p.IntegerPart = 0)) And ((p.IntegerPart Mod 1000000) = 0) And (p.VisibleDigits = 0)) Or ((Not ((p.Exponent >= 0 And p.Exponent <= 5))))) Then Return "many"
+    Case "ga"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2)))) Then Return "two"
+        If (((p.Fraction = 0 And ((p.IntegerPart >= 3 And p.IntegerPart <= 6))))) Then Return "few"
+        If (((p.Fraction = 0 And ((p.IntegerPart >= 7 And p.IntegerPart <= 10))))) Then Return "many"
+    Case "gd"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1 Or p.IntegerPart = 11)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2 Or p.IntegerPart = 12)))) Then Return "two"
+        If (((p.Fraction = 0 And ((p.IntegerPart >= 3 And p.IntegerPart <= 10) Or (p.IntegerPart >= 13 And p.IntegerPart <= 19))))) Then Return "few"
+    Case "gv"
+        If (((p.VisibleDigits = 0) And ((p.IntegerPart Mod 10) = 1))) Then Return "one"
+        If (((p.VisibleDigits = 0) And ((p.IntegerPart Mod 10) = 2))) Then Return "two"
+        If (((p.VisibleDigits = 0) And ((p.IntegerPart Mod 100) = 0 Or (p.IntegerPart Mod 100) = 20 Or (p.IntegerPart Mod 100) = 40 Or (p.IntegerPart Mod 100) = 60 Or (p.IntegerPart Mod 100) = 80))) Then Return "few"
+        If (((Not (p.VisibleDigits = 0)))) Then Return "many"
+    Case "he"
+        If (((p.IntegerPart = 1) And (p.VisibleDigits = 0)) Or ((p.IntegerPart = 0) And (Not (p.VisibleDigits = 0)))) Then Return "one"
+        If (((p.IntegerPart = 2) And (p.VisibleDigits = 0))) Then Return "two"
+    Case "is"
+        If (((p.TrimmedFraction = 0) And ((p.IntegerPart Mod 10) = 1) And (Not ((p.IntegerPart Mod 100) = 11))) Or (((p.TrimmedFraction Mod 10) = 1) And (Not ((p.TrimmedFraction Mod 100) = 11)))) Then Return "one"
+    Case "iu", "naq", "sat", "se", "sma", "smi", "smj", "smn", "sms"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2)))) Then Return "two"
+    Case "kw"
+        If (((p.Fraction = 0 And (p.IntegerPart = 0)))) Then Return "zero"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 100) = 2 Or (p.IntegerPart Mod 100) = 22 Or (p.IntegerPart Mod 100) = 42 Or (p.IntegerPart Mod 100) = 62 Or (p.IntegerPart Mod 100) = 82))) Or ((p.Fraction = 0 And ((p.IntegerPart Mod 1000) = 0)) And (p.Fraction = 0 And (((p.IntegerPart Mod 100000) >= 1000 And (p.IntegerPart Mod 100000) <= 20000) Or (p.IntegerPart Mod 100000) = 40000 Or (p.IntegerPart Mod 100000) = 60000 Or (p.IntegerPart Mod 100000) = 80000))) Or ((Not (p.Fraction = 0 And (p.IntegerPart = 0))) And (p.Fraction = 0 And ((p.IntegerPart Mod 1000000) = 100000)))) Then Return "two"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 100) = 3 Or (p.IntegerPart Mod 100) = 23 Or (p.IntegerPart Mod 100) = 43 Or (p.IntegerPart Mod 100) = 63 Or (p.IntegerPart Mod 100) = 83)))) Then Return "few"
+        If (((Not (p.Fraction = 0 And (p.IntegerPart = 1))) And (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 1 Or (p.IntegerPart Mod 100) = 21 Or (p.IntegerPart Mod 100) = 41 Or (p.IntegerPart Mod 100) = 61 Or (p.IntegerPart Mod 100) = 81)))) Then Return "many"
+    Case "lag"
+        If (((p.Fraction = 0 And (p.IntegerPart = 0)))) Then Return "zero"
+        If (((p.IntegerPart = 0 Or p.IntegerPart = 1) And (Not (p.Fraction = 0 And (p.IntegerPart = 0))))) Then Return "one"
+    Case "lt"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 1)) And (Not (p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 11 And (p.IntegerPart Mod 100) <= 19)))))) Then Return "one"
+        If (((p.Fraction = 0 And (((p.IntegerPart Mod 10) >= 2 And (p.IntegerPart Mod 10) <= 9))) And (Not (p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 11 And (p.IntegerPart Mod 100) <= 19)))))) Then Return "few"
+        If (((Not (p.Fraction = 0)))) Then Return "many"
+    Case "lv", "prg"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 0))) Or ((p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 11 And (p.IntegerPart Mod 100) <= 19)))) Or ((p.VisibleDigits = 2) And (((p.Fraction Mod 100) >= 11 And (p.Fraction Mod 100) <= 19)))) Then Return "zero"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 1)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 11)))) Or ((p.VisibleDigits = 2) And ((p.Fraction Mod 10) = 1) And (Not ((p.Fraction Mod 100) = 11))) Or ((Not (p.VisibleDigits = 2)) And ((p.Fraction Mod 10) = 1))) Then Return "one"
+    Case "mk"
+        If (((p.VisibleDigits = 0) And ((p.IntegerPart Mod 10) = 1) And (Not ((p.IntegerPart Mod 100) = 11))) Or (((p.Fraction Mod 10) = 1) And (Not ((p.Fraction Mod 100) = 11)))) Then Return "one"
+    Case "mo", "ro"
+        If (((p.IntegerPart = 1) And (p.VisibleDigits = 0))) Then Return "one"
+        If (((Not (p.VisibleDigits = 0))) Or ((p.Fraction = 0 And (p.IntegerPart = 0))) Or ((Not (p.Fraction = 0 And (p.IntegerPart = 1))) And (p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 1 And (p.IntegerPart Mod 100) <= 19))))) Then Return "few"
+    Case "mt"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2)))) Then Return "two"
+        If (((p.Fraction = 0 And (p.IntegerPart = 0))) Or ((p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 3 And (p.IntegerPart Mod 100) <= 10))))) Then Return "few"
+        If (((p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 11 And (p.IntegerPart Mod 100) <= 19))))) Then Return "many"
+    Case "pl"
+        If (((p.IntegerPart = 1) And (p.VisibleDigits = 0))) Then Return "one"
+        If (((p.VisibleDigits = 0) And (((p.IntegerPart Mod 10) >= 2 And (p.IntegerPart Mod 10) <= 4)) And (Not (((p.IntegerPart Mod 100) >= 12 And (p.IntegerPart Mod 100) <= 14))))) Then Return "few"
+        If (((p.VisibleDigits = 0) And (Not (p.IntegerPart = 1)) And (((p.IntegerPart Mod 10) >= 0 And (p.IntegerPart Mod 10) <= 1))) Or ((p.VisibleDigits = 0) And (((p.IntegerPart Mod 10) >= 5 And (p.IntegerPart Mod 10) <= 9))) Or ((p.VisibleDigits = 0) And (((p.IntegerPart Mod 100) >= 12 And (p.IntegerPart Mod 100) <= 14)))) Then Return "many"
+    Case "ru", "uk"
+        If (((p.VisibleDigits = 0) And ((p.IntegerPart Mod 10) = 1) And (Not ((p.IntegerPart Mod 100) = 11)))) Then Return "one"
+        If (((p.VisibleDigits = 0) And (((p.IntegerPart Mod 10) >= 2 And (p.IntegerPart Mod 10) <= 4)) And (Not (((p.IntegerPart Mod 100) >= 12 And (p.IntegerPart Mod 100) <= 14))))) Then Return "few"
+        If (((p.VisibleDigits = 0) And ((p.IntegerPart Mod 10) = 0)) Or ((p.VisibleDigits = 0) And (((p.IntegerPart Mod 10) >= 5 And (p.IntegerPart Mod 10) <= 9))) Or ((p.VisibleDigits = 0) And (((p.IntegerPart Mod 100) >= 11 And (p.IntegerPart Mod 100) <= 14)))) Then Return "many"
+    Case "sgs"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 1)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 11))))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2)))) Then Return "two"
+        If (((Not (p.Fraction = 0 And (p.IntegerPart = 2))) And (p.Fraction = 0 And (((p.IntegerPart Mod 10) >= 2 And (p.IntegerPart Mod 10) <= 9))) And (Not (p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 11 And (p.IntegerPart Mod 100) <= 19)))))) Then Return "few"
+        If (((Not (p.Fraction = 0)))) Then Return "many"
+    Case "shi"
+        If (((p.IntegerPart = 0)) Or ((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Fraction = 0 And ((p.IntegerPart >= 2 And p.IntegerPart <= 10))))) Then Return "few"
+    Case "si"
+        If (((p.Fraction = 0 And (p.IntegerPart = 0 Or p.IntegerPart = 1))) Or ((p.IntegerPart = 0) And (p.Fraction = 1))) Then Return "one"
+    Case "sl"
+        If (((p.VisibleDigits = 0) And ((p.IntegerPart Mod 100) = 1))) Then Return "one"
+        If (((p.VisibleDigits = 0) And ((p.IntegerPart Mod 100) = 2))) Then Return "two"
+        If (((p.VisibleDigits = 0) And (((p.IntegerPart Mod 100) >= 3 And (p.IntegerPart Mod 100) <= 4))) Or ((Not (p.VisibleDigits = 0)))) Then Return "few"
+    Case "tzm"
+        If (((p.Fraction = 0 And ((p.IntegerPart >= 0 And p.IntegerPart <= 1)))) Or ((p.Fraction = 0 And ((p.IntegerPart >= 11 And p.IntegerPart <= 99))))) Then Return "one"
+    End Select
+    Return "other"
+End Function
+
+Private Function LocaleOrdinalRule(locale As String, p As PluralOperands) As String
+    Select Case locale
+    Case "af"
+        If (((((p.IntegerPart Mod 100) >= 2 And (p.IntegerPart Mod 100) <= 19)))) Then Return "few"
+    Case "as", "bn"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1 Or p.IntegerPart = 5 Or p.IntegerPart = 7 Or p.IntegerPart = 8 Or p.IntegerPart = 9 Or p.IntegerPart = 10)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2 Or p.IntegerPart = 3)))) Then Return "two"
+        If (((p.Fraction = 0 And (p.IntegerPart = 4)))) Then Return "few"
+        If (((p.Fraction = 0 And (p.IntegerPart = 6)))) Then Return "many"
+    Case "az"
+        If ((((p.IntegerPart Mod 10) = 1 Or (p.IntegerPart Mod 10) = 2 Or (p.IntegerPart Mod 10) = 5 Or (p.IntegerPart Mod 10) = 7 Or (p.IntegerPart Mod 10) = 8)) Or (((p.IntegerPart Mod 100) = 20 Or (p.IntegerPart Mod 100) = 50 Or (p.IntegerPart Mod 100) = 70 Or (p.IntegerPart Mod 100) = 80))) Then Return "one"
+        If ((((p.IntegerPart Mod 10) = 3 Or (p.IntegerPart Mod 10) = 4)) Or (((p.IntegerPart Mod 1000) = 100 Or (p.IntegerPart Mod 1000) = 200 Or (p.IntegerPart Mod 1000) = 300 Or (p.IntegerPart Mod 1000) = 400 Or (p.IntegerPart Mod 1000) = 500 Or (p.IntegerPart Mod 1000) = 600 Or (p.IntegerPart Mod 1000) = 700 Or (p.IntegerPart Mod 1000) = 800 Or (p.IntegerPart Mod 1000) = 900))) Then Return "few"
+        If (((p.IntegerPart = 0)) Or (((p.IntegerPart Mod 10) = 6)) Or (((p.IntegerPart Mod 100) = 40 Or (p.IntegerPart Mod 100) = 60 Or (p.IntegerPart Mod 100) = 90))) Then Return "many"
+    Case "bal", "fil", "fr", "ga", "hy", "lo", "mo", "ms", "ro", "tl", "vi"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+    Case "be"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 2 Or (p.IntegerPart Mod 10) = 3)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 12 Or (p.IntegerPart Mod 100) = 13))))) Then Return "few"
+    Case "bg"
+        If ((((p.IntegerPart Mod 10) = 1) And (Not ((p.IntegerPart Mod 100) = 11)))) Then Return "one"
+        If ((((p.IntegerPart Mod 10) = 2) And (Not ((p.IntegerPart Mod 100) = 12)))) Then Return "two"
+        If ((((p.IntegerPart Mod 10) = 3 Or (p.IntegerPart Mod 10) = 4) And (Not ((p.IntegerPart Mod 100) = 13 Or (p.IntegerPart Mod 100) = 14)))) Then Return "few"
+    Case "blo"
+        If (((p.IntegerPart = 0))) Then Return "zero"
+        If (((p.IntegerPart = 1))) Then Return "one"
+        If (((p.IntegerPart = 2 Or p.IntegerPart = 3 Or p.IntegerPart = 4 Or p.IntegerPart = 5 Or p.IntegerPart = 6))) Then Return "few"
+    Case "ca"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1 Or p.IntegerPart = 3)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2)))) Then Return "two"
+        If (((p.Fraction = 0 And (p.IntegerPart = 4)))) Then Return "few"
+    Case "cy"
+        If (((p.Fraction = 0 And (p.IntegerPart = 0 Or p.IntegerPart = 7 Or p.IntegerPart = 8 Or p.IntegerPart = 9)))) Then Return "zero"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2)))) Then Return "two"
+        If (((p.Fraction = 0 And (p.IntegerPart = 3 Or p.IntegerPart = 4)))) Then Return "few"
+        If (((p.Fraction = 0 And (p.IntegerPart = 5 Or p.IntegerPart = 6)))) Then Return "many"
+    Case "en"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 1)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 11))))) Then Return "one"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 2)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 12))))) Then Return "two"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 3)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 13))))) Then Return "few"
+    Case "es"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 1 Or (p.IntegerPart Mod 10) = 3)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 11))))) Then Return "one"
+    Case "gd"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1 Or p.IntegerPart = 11)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2 Or p.IntegerPart = 12)))) Then Return "two"
+        If (((p.Fraction = 0 And (p.IntegerPart = 3 Or p.IntegerPart = 13)))) Then Return "few"
+    Case "gu", "hi"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2 Or p.IntegerPart = 3)))) Then Return "two"
+        If (((p.Fraction = 0 And (p.IntegerPart = 4)))) Then Return "few"
+        If (((p.Fraction = 0 And (p.IntegerPart = 6)))) Then Return "many"
+    Case "hu"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1 Or p.IntegerPart = 5)))) Then Return "one"
+    Case "it", "lld", "sc", "vec"
+        If (((p.Fraction = 0 And (p.IntegerPart = 11 Or p.IntegerPart = 8 Or p.IntegerPart = 80 Or p.IntegerPart = 800)))) Then Return "many"
+    Case "ka"
+        If (((p.IntegerPart = 1))) Then Return "one"
+        If (((p.IntegerPart = 0)) Or ((((p.IntegerPart Mod 100) >= 2 And (p.IntegerPart Mod 100) <= 20) Or (p.IntegerPart Mod 100) = 40 Or (p.IntegerPart Mod 100) = 60 Or (p.IntegerPart Mod 100) = 80))) Then Return "many"
+    Case "kk"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 6))) Or ((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 9))) Or ((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 0)) And (Not (p.Fraction = 0 And (p.IntegerPart = 0))))) Then Return "many"
+    Case "kok", "kok-latn", "mr"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2 Or p.IntegerPart = 3)))) Then Return "two"
+        If (((p.Fraction = 0 And (p.IntegerPart = 4)))) Then Return "few"
+    Case "kw"
+        If (((p.Fraction = 0 And ((p.IntegerPart >= 1 And p.IntegerPart <= 4)))) Or ((p.Fraction = 0 And (((p.IntegerPart Mod 100) >= 1 And (p.IntegerPart Mod 100) <= 4) Or ((p.IntegerPart Mod 100) >= 21 And (p.IntegerPart Mod 100) <= 24) Or ((p.IntegerPart Mod 100) >= 41 And (p.IntegerPart Mod 100) <= 44) Or ((p.IntegerPart Mod 100) >= 61 And (p.IntegerPart Mod 100) <= 64) Or ((p.IntegerPart Mod 100) >= 81 And (p.IntegerPart Mod 100) <= 84))))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 5))) Or ((p.Fraction = 0 And ((p.IntegerPart Mod 100) = 5)))) Then Return "many"
+    Case "lij", "scn"
+        If (((p.Fraction = 0 And (p.IntegerPart = 11 Or p.IntegerPart = 8 Or (p.IntegerPart >= 80 And p.IntegerPart <= 89) Or (p.IntegerPart >= 800 And p.IntegerPart <= 899))))) Then Return "many"
+    Case "mk"
+        If ((((p.IntegerPart Mod 10) = 1) And (Not ((p.IntegerPart Mod 100) = 11)))) Then Return "one"
+        If ((((p.IntegerPart Mod 10) = 2) And (Not ((p.IntegerPart Mod 100) = 12)))) Then Return "two"
+        If ((((p.IntegerPart Mod 10) = 7 Or (p.IntegerPart Mod 10) = 8) And (Not ((p.IntegerPart Mod 100) = 17 Or (p.IntegerPart Mod 100) = 18)))) Then Return "many"
+    Case "ne"
+        If (((p.Fraction = 0 And ((p.IntegerPart >= 1 And p.IntegerPart <= 4))))) Then Return "one"
+    Case "or"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1 Or p.IntegerPart = 5 Or (p.IntegerPart >= 7 And p.IntegerPart <= 9))))) Then Return "one"
+        If (((p.Fraction = 0 And (p.IntegerPart = 2 Or p.IntegerPart = 3)))) Then Return "two"
+        If (((p.Fraction = 0 And (p.IntegerPart = 4)))) Then Return "few"
+        If (((p.Fraction = 0 And (p.IntegerPart = 6)))) Then Return "many"
+    Case "sq"
+        If (((p.Fraction = 0 And (p.IntegerPart = 1)))) Then Return "one"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 4)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 14))))) Then Return "many"
+    Case "sv"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 1 Or (p.IntegerPart Mod 10) = 2)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 11 Or (p.IntegerPart Mod 100) = 12))))) Then Return "one"
+    Case "tk"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 6 Or (p.IntegerPart Mod 10) = 9))) Or ((p.Fraction = 0 And (p.IntegerPart = 10)))) Then Return "few"
+    Case "uk"
+        If (((p.Fraction = 0 And ((p.IntegerPart Mod 10) = 3)) And (Not (p.Fraction = 0 And ((p.IntegerPart Mod 100) = 13))))) Then Return "few"
+    End Select
+    Return "other"
+End Function
+
+Private Function LocaleKnownRule(locale As String) As Boolean
+    Select Case locale
+    Case "af", "ak", "am", "an", "ar", "ars", "as", "asa", "ast", "az", "bal", "be", "bem", "bez", "bg", "bho", "blo", "bm", "bn", "bo"
+        Return True
+    Case "br", "brx", "bs", "ca", "ce", "ceb", "cgg", "chr", "ckb", "cs", "csw", "cv", "cy", "da", "de", "doi", "dsb", "dv", "dz", "ee"
+        Return True
+    Case "el", "en", "eo", "es", "et", "eu", "fa", "ff", "fi", "fil", "fo", "fr", "fur", "fy", "ga", "gd", "gl", "gsw", "gu", "guw"
+        Return True
+    Case "gv", "ha", "haw", "he", "hi", "hnj", "hr", "hsb", "hu", "hy", "ia", "id", "ie", "ig", "ii", "io", "is", "it", "iu", "ja"
+        Return True
+    Case "jbo", "jgo", "jmc", "jv", "jw", "ka", "kab", "kaj", "kcg", "kde", "kea", "kk", "kkj", "kl", "km", "kn", "ko", "kok", "kok-latn", "ks"
+        Return True
+    Case "ksb", "ksh", "ku", "kw", "ky", "lag", "lb", "lg", "lij", "lkt", "lld", "ln", "lo", "lt", "lv", "mas", "mg", "mgo", "mk", "ml"
+        Return True
+    Case "mn", "mo", "mr", "ms", "mt", "my", "nah", "naq", "nb", "nd", "ne", "nl", "nn", "nnh", "no", "nqo", "nr", "nso", "ny", "nyn"
+        Return True
+    Case "om", "or", "os", "osa", "pa", "pap", "pcm", "pl", "prg", "ps", "pt", "pt-pt", "rm", "ro", "rof", "ru", "rwk", "sah", "saq", "sat"
+        Return True
+    Case "sc", "scn", "sd", "sdh", "se", "seh", "ses", "sg", "sgs", "sh", "shi", "si", "sk", "sl", "sma", "smi", "smj", "smn", "sms", "sn"
+        Return True
+    Case "so", "sq", "sr", "ss", "ssy", "st", "su", "sv", "sw", "syr", "ta", "te", "teo", "tg", "th", "ti", "tig", "tk", "tl", "tn"
+        Return True
+    Case "to", "tpi", "tr", "ts", "tzm", "ug", "uk", "und", "ur", "uz", "ve", "vec", "vi", "vo", "vun", "wa", "wae", "wo", "xh", "xog"
+        Return True
+    Case "yi", "yo", "yue", "zh", "zu"
+        Return True
+    End Select
+    Return False
+End Function
