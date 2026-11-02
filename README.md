@@ -1,4 +1,4 @@
-# Select CLDR plural forms from exact decimal text
+# CLDR cardinal/ordinal plurals from exact decimal text
 
 Portable CLDR 49 cardinal and ordinal plural categories over **exact decimal text**.
 `Import localekit` after copying `packages/localekit-0.1.0.buipkg` into a consumer's
