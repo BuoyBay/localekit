@@ -58,25 +58,13 @@ Messages are mutable and should be confined to one thread or externally synchron
 Invalid inputs, categories, locales and bounds throw `InvalidArgumentException`.
 No current OS language or locale is read or changed.
 
-## Scope and verification
+## Scope
 
 This package provides plural rules and explicit-locale messages. It does not add
 number/date formatting, locale collation, calendars, currency patterns, language
 alias canonicalization, ICU message syntax or gettext runtime loading. It does not
 change Buoy's built-in `Locale` or `Localization` declarations.
 
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
-Regenerate predicates with `python3 tools/generate_localekit_tables.py`; use
-`--check` for reproducibility verification. Hand-written source lives in
-`data/LocaleKit.bui.in`; generated `modules/LocaleKit.bui` is the compiled artifact.
-See provenance.
-
-Verification seals into an isolated temporary directory. Add `--update-package`
-to `tests/localekit_verify.py` to explicitly refresh the checked-in package after
-successful checks; ordinary validation leaves that archive unchanged.
-
-Maintainers run the private validation suite before release. See the repository README for public build instructions.
-
+Pinned CLDR inputs and the source template are in `data/`; `modules/LocaleKit.bui` contains the generated predicates. The [provenance record](../buoybay-licenses/PROVENANCE.md) identifies the data release, checksums and Unicode license.
 
 [Typed API](typed-api.md) · [Getting started](getting-started.md)

@@ -7,17 +7,13 @@ The pinned source is Unicode CLDR JSON release **49.0.0**, repository
 
 The unmodified official JSON files are retained in `data/`; SHA-256 fingerprints
 are recorded in `data/source.json`. The repository's Unicode license is included
-as `resources/LICENSE.txt`. Ordinary compilation/sealing and verification work
-offline. Updating CLDR requires replacing the pinned source files deliberately,
-updating `data/source.json` hashes and the generator's release metadata, regenerating,
-and rerunning tests. Generation validates the existing pins and each input's CLDR
-version before producing output; it never refreshes hashes implicitly.
+as `resources/LICENSE.txt`. The retained data and generated Buoy predicates support offline use. Updating CLDR requires replacing the pinned source files deliberately,
+updating `data/source.json` hashes and regenerating the corresponding predicates.
+Check the source release and hashes deliberately when changing those inputs.
 
-`tools/generate_localekit_tables.py` parses the finite relation grammar present
-in these files and emits Buoy predicates. It fails on unrecognized grammar rather
-than guessing. Category sample annotations remain in the source JSON and drive
-runtime verification; compact-number annotations are explicitly outside the API.
+The predicates implement the finite relation grammar in those CLDR files.
+Category sample annotations remain in the retained source JSON; compact-number
+annotations are outside the API.
 
-The exact-decimal operand parser, message wrapper, generator and verification
-interpreter are newly written workspace code. No CLDR engine implementation or
+The exact-decimal operand parser and message wrapper are independently written Buoy code. No CLDR engine implementation or
 third-party locale formatting library is copied or linked.
